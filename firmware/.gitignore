@@ -1,0 +1,18 @@
+# project out
+/build
+/bin
+/obj
+/out
+
+# STM32CubeIDE files
+/.settings
+*.cproject
+*.mxproject
+*.project
+*.ld
+
+# EIDE files
+/.eide
+/.vscode
+*.clang-format
+*.code-workspace

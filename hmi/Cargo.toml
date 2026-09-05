@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/f2mc-core",
+    "crates/stm32-flash",
+    "crates/f2mc-gui",
+    "crates/f2mc-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# 统一依赖版本（子 crate 用 workspace = true 引用）
+[workspace.dependencies]
+f2mc-core = { path = "crates/f2mc-core" }
+stm32-flash = { path = "crates/stm32-flash" }
+
+eframe = "0.35"
+egui = "0.35"
+hidapi = { version = "2", default-features = false, features = ["linux-native-basic-udev"] }
+nusb = "0.1"
+ihex = "3"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+os_info = "3"
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+# probe-rs 在 T4 加入并 pin 死版本（API 变动频繁）
+probe-rs = "=0.32.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+debug = false

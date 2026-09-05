@@ -1,0 +1,16 @@
+[package]
+name = "f2mc-cli"
+description = "F2MC-8FX programmer CLI with OpenOCD-compatible shim mode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "f2mc-programmer-cli"
+path = "src/main.rs"
+
+[dependencies]
+f2mc-core.workspace = true
+
+[build-dependencies]
+embed-resource = "3"

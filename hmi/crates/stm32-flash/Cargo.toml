@@ -1,0 +1,12 @@
+[package]
+name = "stm32-flash"
+description = "STM32 flashing core via probe-rs (UI-independent)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+probe-rs.workspace = true
