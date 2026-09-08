@@ -130,8 +130,9 @@ fn e2e_secure_lock_unlock_cycle() {
     assert!(!client.transport_mut().locked);
 }
 
-/// 回归：烧录后选“保持编程模式”（QUIT→SYNCED），再次烧录/校验不得报 STATE_ERROR
-/// （固件 ENTER_PGM 仅 IDLE 可用，上位机须先 RESET_RUN 复位状态机）
+/// 回归：烧录后选“保持编程模式”（停留 RW 模式），再次烧录/校验不得卡死——
+/// 固件 ENTER_PGM 任何状态可进（pgmseq 内含完整断电重进），上位机重进路径
+/// 不再先 QUIT/RESET_RUN（后者在新固件会多做一次电源循环）
 #[test]
 fn e2e_reprogram_after_keep_pgm_mode() {
     let data = gen_image(7, 512);
@@ -141,19 +142,18 @@ fn e2e_reprogram_after_keep_pgm_mode() {
     flow::program(&mut client, &img, &opts, &mut |_| {}, &flow::default_cancel()).unwrap();
     // reset_after=false：结束后保持读写模式（会话保持）
     assert_eq!(client.transport_mut().state, f2mc_core::sim::SimState::RwMode);
-    // 再次烧录（状态机处于 RW_MODE）
+    // 再次烧录（状态机处于 RW_MODE，ENTER_PGM 直进）
     flow::program(&mut client, &img, &opts, &mut |_| {}, &flow::default_cancel()).unwrap();
     // 仅校验同样可行
     flow::verify_only(&mut client, &img, &mut |_| {}, &flow::default_cancel()).unwrap();
-    // 会话保持：第二次烧录经 RW→QUIT→RESET→完整重进（QUIT 后握手失效，必须重新握手），
-    // 校验则在读写模式直进不再 ENTER_PGM——共 2 次 ENTER_PGM（0x03）
+    // 共 2 次 ENTER_PGM（0x03）：两次烧录各完整重进一次；校验在 RW 直进不进
     let enters = client
         .transport_mut()
         .frame_log
         .iter()
         .filter(|f| f.len() > 1 && f[1] == 0x03)
         .count();
-    assert_eq!(enters, 2, "烧录重进 1 次 + 首次 1 次；校验直进不计");
+    assert_eq!(enters, 2, "两次烧录各重进一次；校验直进不计");
 }
 
 #[test]
@@ -185,6 +185,77 @@ fn e2e_twenty_consecutive_cycles() {
         .unwrap_or_else(|e| panic!("cycle {i} failed: {e}"));
         assert_eq!(report.bytes_verified, 1024);
     }
+}
+
+/// 回归（用户报告）：擦除后再烧录、烧录后再擦除不得卡死/超时循环
+/// （GUI 序列：EraseOnly → Program、Program → EraseOnly，两种 reset_after 均覆盖）
+#[test]
+fn e2e_erase_program_alternate_no_loop() {
+    use f2mc_core::flow::FlowEvent;
+    let data = gen_image(0xF698, 512);
+    let img = hexfile::parse(&to_hex(&[(0x8000, &data)]), chip()).unwrap();
+
+    for (i, reset_after) in [true, false].into_iter().enumerate() {
+        let mut client = F2mcClient::new(SimProgrammer::new());
+        let opts = FlowOptions { write_secure: false, reset_after };
+        // 擦除 → 烧录 → 擦除 → 烧录（连续两轮，任何一步失败即暴露）
+        flow::erase_only(&mut client, &mut |_| {}, &flow::default_cancel())
+            .unwrap_or_else(|e| panic!("cfg{i}: first erase failed: {e}"));
+        flow::program(&mut client, &img, &opts, &mut |_| {}, &flow::default_cancel())
+            .unwrap_or_else(|e| panic!("cfg{i}: program after erase failed: {e}"));
+        flow::erase_only(&mut client, &mut |_| {}, &flow::default_cancel())
+            .unwrap_or_else(|e| panic!("cfg{i}: erase after program failed: {e}"));
+        assert!(client.transport_mut().flash.is_empty());
+        flow::program(&mut client, &img, &opts, &mut |_| {}, &flow::default_cancel())
+            .unwrap_or_else(|e| panic!("cfg{i}: second program failed: {e}"));
+        // 每个流程都应终止于 Quit 阶段（完成标记），无死循环
+        let mut last_stage = None;
+        flow::erase_only(&mut client, &mut |e| {
+            if let FlowEvent::StageStart(s) = e {
+                last_stage = Some(s);
+            }
+        }, &flow::default_cancel())
+        .unwrap();
+        assert_eq!(last_stage, Some(flow::Stage::Quit));
+    }
+}
+
+/// 回归（用户报告）：读取流程必须经历 初始化→读取 阶段（此前一直停在"进入编程模式"）
+#[test]
+fn e2e_readout_stage_events() {
+    use f2mc_core::flow::{FlowEvent, Stage};
+    let data = gen_image(77, 256);
+    let img = hexfile::parse(&to_hex(&[(0x8000, &data)]), chip()).unwrap();
+    let mut client = F2mcClient::new(SimProgrammer::new());
+    flow::program(&mut client, &img, &FlowOptions::default(), &mut |_| {}, &flow::default_cancel())
+        .unwrap();
+
+    let mut stages = Vec::new();
+    flow::read_out(&mut client, 0x1000, 0x1000, &mut |e| {
+        if let FlowEvent::StageStart(s) = e {
+            stages.push(s);
+        }
+    }, &flow::default_cancel())
+    .unwrap();
+    assert_eq!(
+        stages,
+        vec![Stage::Ping, Stage::EnterPgm, Stage::FlashInit, Stage::Read, Stage::Quit],
+        "readout 阶段序列（保持编程模式时已有 FlashInit 则不再重复）"
+    );
+}
+
+/// 烧录恢复流程：强制进入 + 整片擦除；恢复后可正常烧录
+#[test]
+fn e2e_recover_then_program() {
+    let mut client = F2mcClient::new(SimProgrammer::new());
+    // 模拟"上次烧录异常"后的恢复：recover 应完成进入+整片擦除
+    flow::recover(&mut client, &mut |_| {}, &flow::default_cancel()).unwrap();
+    assert_eq!(client.transport_mut().state, f2mc_core::sim::SimState::Erased);
+    // 恢复后可正常烧录
+    let data = gen_image(55, 256);
+    let img = hexfile::parse(&to_hex(&[(0x8000, &data)]), chip()).unwrap();
+    flow::program(&mut client, &img, &FlowOptions::default(), &mut |_| {}, &flow::default_cancel())
+        .unwrap();
 }
 
 #[test]
