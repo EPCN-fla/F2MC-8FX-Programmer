@@ -93,9 +93,9 @@ __STATIC_INLINE uint8_t DAP_GetTargetBoardNameString (char *str) {
   (void)str; return 0U;
 }
 __STATIC_INLINE uint8_t DAP_GetProductFirmwareVersionString (char *str) {
-  const char *s = "0.1.0";   /* 与 App/cmd.h 的 FW_VER_* 保持一致 */
+  const char *s = "0.2.0";   /* 与 App/cmd.h 的 FW_VER_* 保持一致 */
   (void)strcpy(str, s);
-  return (uint8_t)(sizeof("0.1.0"));
+  return (uint8_t)(sizeof("0.2.0"));
 }
 
 //**************************************************************************************************

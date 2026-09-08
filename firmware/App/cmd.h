@@ -27,7 +27,7 @@ typedef enum
 /** @name 固件版本（PING 响应，与 DAP_config.h 的 Product FW Ver 同步）
  * @{ */
 #define FW_VER_MAJOR    0U
-#define FW_VER_MINOR    1U
+#define FW_VER_MINOR    2U
 #define FW_VER_PATCH    0U
 /** @} */
 
