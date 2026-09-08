@@ -15,7 +15,7 @@
 - 上位机 STM32 路径由 probe-rs 驱动，支持全系 STM32 与芯片自动识别
 
 **USB 全平台免驱**
-- CMSIS-DAP **v1(HID) + v2(Bulk) 双接口**同一设备：Win8.1+ 走 v2（MS OS 2.0 自动绑 WinUSB），**Win7 产线走 v1（HID 天生免驱）**，Linux/macOS 免驱
+- CMSIS-DAP **v1(HID) + v2(Bulk) 双接口**同一设备：Win8.1+ 走 v2（MS OS 2.0 自动绑 WinUSB），**Win7 走 v1（HID 天生免驱）**，Linux/macOS 免驱
 
 **上位机三形态**（Rust workspace，`hmi/`）
 - `f2mc-gui`：egui 工业风格 GUI（双目标家族切换、拖放烧录、进度/取消/日志）
@@ -52,10 +52,11 @@
 F2MC-8FX-Programmer/
 ├── diagram/              # F2MC-LINK v1.1 原理图
 ├── docs/
-│   ├── references/       # 参考资料（New 8FX MB95630H 硬件手册，第 25/26/27 章）
+│   ├── references/       # 参考资料
 │   ├── 固件使用说明.md
 │   ├── 上位机使用说明.md
-│   └── 通信协议约定.md
+│   ├── 通信协议约定.md
+│   └── DA 结构解析.md
 ├── firmware/             # 编程器固件（STM32F103C8T6，CubeMX HAL + RT-Thread Nano）
 │                         #   CMSIS-DAP v1/v2 双接口 + vendor(0x80) 命令路由 + New8FX L2 引擎 + SWD 引擎
 │                         #   说明文档：docs/固件使用说明.md
@@ -68,6 +69,7 @@ F2MC-8FX-Programmer/
 ## 致谢与参考
 
 - [BruceSuen/8FX-MCU](https://github.com/BruceSuen/8FX-MCU) —— New8FX 串行编程规范 PDF 与官方 BGM 适配器固件源码
+- [mnaberez/f2mc8dasm](https://github.com/mnaberez/f2mc8dasm) —— F2MC-8FX DA 线性反汇编
 - [CMSIS-DAP](https://github.com/ARM-software/CMSIS-DAP) / [DAPLink](https://github.com/ARMmbed/DAPLink) —— 参考固件
 - [probe-rs](https://probe.rs) —— 上位机 STM32 路径
 - [RT-Thread Nano](https://www.rt-thread.io/) —— 固件 RTOS
