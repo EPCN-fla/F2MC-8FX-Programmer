@@ -25,9 +25,8 @@ uint8_t new8fx_flash_init(void);
 /**
  * @name DA 型号匹配（通信协议约定 §3.1 SET_CHIP）
  * DA 与目标 boot ROM 常驻监视器布局严格配对——固件内嵌 DA 表
- * （DA_SPEC_M1 / DA_YM02_M1，见 docs/DA 结构解析.md），上位机经
- * SET_CHIP 下发型号名（如 "MB95F698K"），按系列匹配；未匹配/未下发
- * 时用默认（Spec-198B）。
+ * （DA_SPEC_M1，见 docs/DA 结构解析.md），上位机经 SET_CHIP
+ * 下发型号名（如 "MB95F698K"），按系列匹配；未匹配/未下发时用默认。
  * @{ */
 /** @brief 下发型号名并匹配 DA（name 为原始 ASCII，无需 NUL 结尾） */
 void new8fx_set_chip(const uint8_t *name, uint16_t len);

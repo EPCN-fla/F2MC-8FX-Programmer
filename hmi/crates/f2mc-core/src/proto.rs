@@ -40,8 +40,8 @@ pub mod timeout {
     pub const PING: Duration = Duration::from_secs(1);
     /// SET_POWER：上电含 3 s 上升确认
     pub const SET_POWER: Duration = Duration::from_secs(5);
-    /// ENTER_PGM 须覆盖固件最坏路径：整循环重试 ×3（握手失败时放电→上电→
-    /// 保持→握手重进，参照 YM02 恢复行为）——单次最坏 ~13s（放电≤10s+上电
+    /// ENTER_PGM 须覆盖固件最坏路径：整循环重试 ×3（握手失败时放电 → 上电 →
+    /// 保持 → 握手重进——单次最坏 ~13s（放电≤10s+上电
     /// ≤3s+稳定≤10s 等不会同时拉满），3 次 ≈ 40s 上限
     pub const ENTER_PGM: Duration = Duration::from_secs(40);
     pub const ERASE: Duration = Duration::from_secs(90);

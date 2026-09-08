@@ -247,8 +247,7 @@ pub fn erase_only<T: DapTransport>(
 }
 
 /// 烧录恢复：强制进入（固件内含整循环重试）→ 整片擦除。
-/// 用于上次烧录异常（如错配 DA 写坏目标 Flash）导致无法正常烧录时的恢复
-/// （参照 YM02：能进模式就能整片擦除重来）。结束后保持 SYNCED。
+/// 用于上次烧录异常（如错配 DA 写坏目标 Flash）导致无法正常烧录时的恢复。结束后保持 SYNCED。
 pub fn recover<T: DapTransport>(
     client: &mut F2mcClient<T>,
     cb: &mut dyn FnMut(FlowEvent),
