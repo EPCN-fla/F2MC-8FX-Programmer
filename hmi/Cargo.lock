@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "f2mc-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "embed-resource",
  "f2mc-core",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "f2mc-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-io",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "f2mc-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

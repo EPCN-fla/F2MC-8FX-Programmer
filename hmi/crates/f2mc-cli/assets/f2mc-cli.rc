@@ -1,8 +1,8 @@
 1 ICON "f2mc-cli.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -15,12 +15,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "F2MC Studio Project"
             VALUE "FileDescription", "F2MC-8FX Programmer CLI (OpenOCD-compatible)"
-            VALUE "FileVersion", "0.1.0.0"
+            VALUE "FileVersion", "0.2.0.0"
             VALUE "InternalName", "f2mc-programmer-cli"
             VALUE "LegalCopyright", "Copyright (c) 2026"
             VALUE "OriginalFilename", "f2mc-programmer-cli.exe"
             VALUE "ProductName", "F2MC Studio"
-            VALUE "ProductVersion", "0.1.0.0"
+            VALUE "ProductVersion", "0.2.0.0"
         END
     END
     BLOCK "VarFileInfo"

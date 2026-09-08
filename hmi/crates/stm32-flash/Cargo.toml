@@ -1,7 +1,7 @@
 [package]
 name = "stm32-flash"
 description = "STM32 flashing core via probe-rs (UI-independent)"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
