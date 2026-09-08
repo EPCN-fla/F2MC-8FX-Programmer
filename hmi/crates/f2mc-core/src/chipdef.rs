@@ -38,10 +38,13 @@ impl ChipDef {
     }
 
     /// 有效区间描述（GUI 显示，如 "0x1000~0x1FFF + 0x8000~0xFFFF"）
+    ///
+    /// 上 bank 起点落在下 bank 内（如 MB95F698K 的 0x1000 连续映射）时，
+    /// 上 bank 段从下 bank 之后起显示（"0x1000~0x1FFF + 0x2000~0xFFFF"）。
     pub fn ranges_desc(&self) -> String {
+        let upper_show = self.upper_low.max(LOWER_BANK_HIGH + 1);
         format!(
-            "0x{LOWER_BANK_LOW:04X}~0x{LOWER_BANK_HIGH:04X} + 0x{:04X}~0x{FLASH_HIGH:04X}",
-            self.upper_low
+            "0x{LOWER_BANK_LOW:04X}~0x{LOWER_BANK_HIGH:04X} + 0x{upper_show:04X}~0x{FLASH_HIGH:04X}"
         )
     }
 }
@@ -66,7 +69,13 @@ fn load_chips() -> Vec<ChipDef> {
             Some(v) => v,
             None => continue,
         };
-        let flash_bytes = (LOWER_BANK_HIGH - LOWER_BANK_LOW + 1) + (0x10000 - upper_low);
+        // 上 bank 起点 ≤ 下 bank 起点（如 MB95F698K 的 0x1000:0xFFFF 连续映射）时
+        // 整片为单一区域，不再重复计入下 bank
+        let flash_bytes = if upper_low <= LOWER_BANK_LOW {
+            0x10000 - LOWER_BANK_LOW
+        } else {
+            (LOWER_BANK_HIGH - LOWER_BANK_LOW + 1) + (0x10000 - upper_low)
+        };
         let fram = !name.starts_with("MB95F");
         out.push(ChipDef { name, upper_low, flash_bytes, fram });
     }
@@ -130,6 +139,21 @@ mod tests {
         let f632 = by_name("MB95F632H").unwrap();
         assert_eq!(f632.upper_low, 0xF000);
         assert_eq!(f632.flash_bytes, 8 * 1024);
+    }
+
+    #[test]
+    fn f698_contiguous_map() {
+        // MB95F698K：CSV 为 0x1000:0xFFFF 单一连续映射（60KB），无空洞
+        let f698 = by_name("MB95F698K").unwrap();
+        assert_eq!(f698.upper_low, 0x1000);
+        assert_eq!(f698.flash_bytes, 60 * 1024);
+        assert!(f698.is_valid_addr(0x1000));
+        assert!(f698.is_valid_addr(0x5000)); // F636K 的空洞区在 F698K 有效
+        assert!(!f698.is_valid_addr(0x0FFF));
+        // 连续映射显示：上 bank 段从下 bank 之后起，不重叠
+        assert_eq!(f698.ranges_desc(), "0x1000~0x1FFF + 0x2000~0xFFFF");
+        let f636 = by_name("MB95F636H").unwrap();
+        assert_eq!(f636.ranges_desc(), "0x1000~0x1FFF + 0x8000~0xFFFF");
     }
 
     #[test]
