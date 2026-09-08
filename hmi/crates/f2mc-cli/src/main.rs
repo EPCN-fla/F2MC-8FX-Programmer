@@ -181,9 +181,7 @@ fn cmd_erase(_a: &Args) -> Result<(), String> {
 }
 
 /// `recover` 子命令：烧录恢复（强制进入含整循环重试 + 整片擦除）
-///
-/// 用于上次烧录异常（如错配 DA 写坏目标 Flash）导致无法正常烧录时；
-/// 参照 YM02 行为：能进编程模式就能整片擦除重来。
+/// 用于上次烧录异常（如错配 DA 写坏目标 Flash）导致无法正常烧录时
 fn cmd_recover(_a: &Args) -> Result<(), String> {
     let mut client = open_client()?;
     flow::recover(&mut client, &mut on_event, &flow::default_cancel()).map_err(map_err)?;

@@ -16,7 +16,5 @@ pub const SECURE_ADDR: u32 = 0xFFFC;
 pub const CR_NVR_ADDRS: [u16; 3] = [0xFFBB, 0xFFBC, 0xFFBD];
 pub const CR_RAM_ADDRS: [u16; 3] = [0x0FE7, 0x0FE4, 0x0FE5];
 
-// INIT DA.BIN：固件内嵌两版（Spec-198B 默认 / YM02-141B 备用），上位机经
-// SET_CHIP(0x13) 下发型号名，固件按系列匹配（docs/DA 结构解析.md）。
-// ⚠ DA 与目标 boot ROM 常驻监视器布局严格配对（含绝对跳转地址），选错变体
-// 会导致 FLASH_INIT 后读写全灭。
+// INIT DA.BIN：固件内嵌，上位机经 SET_CHIP(0x13) 下发型号名，固件按系列匹配（docs/DA 结构解析.md）。
+// ⚠ DA 与目标 boot ROM 常驻监视器布局严格配对（含绝对跳转地址），选错变体会导致 FLASH_INIT 后读写全灭。

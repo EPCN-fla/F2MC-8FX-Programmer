@@ -850,7 +850,7 @@ impl F2mcStudioApp {
                         }
                         if ui
                             .add_enabled(can_op, egui::Button::new("恢复"))
-                            .on_hover_text("烧录恢复：强制进入（固件内含整循环重试）+ 整片擦除。\n用于上次烧录异常导致无法正常烧录时（参照 YM02 行为）")
+                            .on_hover_text("烧录恢复：强制进入（固件内含整循环重试）+ 整片擦除。\n用于上次烧录异常导致无法正常烧录时")
                             .clicked()
                         {
                             self.begin_job(UiCommand::Recover);

@@ -85,11 +85,7 @@ typedef struct {
     uint16_t       da_len;
 } da_entry_t;
 
-/**
- * @brief 系列匹配表：未命中走默认（DA_SPEC_M1）。
- * @note  实测：F69x（690K）必须 Spec 版；F63x（630H）两版皆可。
- *        新型号失败时用 firmware/Test/dbg_sniff.py 嗅探 YM02 补新变体。
- */
+/** @brief 系列匹配表：未命中走默认（DA_SPEC_M1） */
 static const da_entry_t DA_TABLE[] = {
     {"69", DA_SPEC_M1, (uint16_t)sizeof(DA_SPEC_M1)},
     {"63", DA_SPEC_M1, (uint16_t)sizeof(DA_SPEC_M1)},
@@ -313,7 +309,7 @@ static uint8_t erase_fire(uint16_t addr)
 
 /**
  * @brief FLASH_INIT 实体（固件使用说明 §2.5）：3 头帧 + N 帧 DA.BIN + 尾帧，随后切 500K
- * @note DA 由固件内嵌表按 SET_CHIP 下发的型号匹配（默认 Spec-198B）；
+ * @note DA 由固件内嵌表按 SET_CHIP 下发的型号匹配；
  *       结构与配对依据见 docs/DA 结构解析.md。
  * @note 失败日志带 exti_delta/lvl 诊断：delta=0=DA 沉默；delta>0=RX 丢帧
  */
@@ -406,9 +402,9 @@ static uint8_t op_cr_trim(void *arg)
 /* 对外 API                                                              */
 /* ------------------------------------------------------------------ */
 
-/** @brief ENTER_PGM 整循环重试次数：握手失败时重进（放电→上电→保持→握手）。
+/** @brief ENTER_PGM 整循环重试次数：握手失败时重进（放电 → 上电 → 保持 → 握手）。
  *  大 die 目标（F698K）偶发 boot ROM 错过 DBG 采样窗口/POR 边际失败——
- *  整循环重试等价于人工断电重试（参照 YM02 恢复行为），显著放大进入成功率 */
+ *  整循环重试等价于人工断电重试，显著放大进入成功率 */
 #define ENTER_RETRY_MAX     3U
 
 uint8_t new8fx_enter_pgm(void)
@@ -455,7 +451,7 @@ uint8_t new8fx_erase_preinit(uint16_t addr)
 
 uint8_t new8fx_flash_init(void)
 {
-    /* YM02 嗅探证实：erase 后直接进 flash_init，无需重做 clock_mod。 */
+    /* erase 后直接进 flash_init，无需重做 clock_mod。 */
     return with_retry(op_flash_init, RT_NULL, "flash_init");
 }
 
