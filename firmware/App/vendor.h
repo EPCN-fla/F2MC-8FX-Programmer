@@ -35,6 +35,7 @@
 #define L1_CMD_SEND_BREAK       0x10U   /**< 发送 UART Break（通信恢复） */
 #define L1_CMD_DISCONNECT       0x11U   /**< 上位机断开通知（LED 灭+回 IDLE） */
 #define L1_CMD_ABORT            0x12U   /**< 强制中止当前长操作（带外生效） */
+#define L1_CMD_SET_CHIP         0x13U   /**< 下发型号名（ASCII ≤24B）：固件按系列匹配内嵌 DA */
 /** @} */
 
 /** @name L1 状态码（通信协议约定 §3.3）
