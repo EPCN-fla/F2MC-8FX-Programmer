@@ -849,6 +849,13 @@ impl F2mcStudioApp {
                             self.begin_job(UiCommand::EraseOnly);
                         }
                         if ui
+                            .add_enabled(can_op, egui::Button::new("恢复"))
+                            .on_hover_text("烧录恢复：强制进入（固件内含整循环重试）+ 整片擦除。\n用于上次烧录异常导致无法正常烧录时（参照 YM02 行为）")
+                            .clicked()
+                        {
+                            self.begin_job(UiCommand::Recover);
+                        }
+                        if ui
                             .add_enabled(can_op && has_img, egui::Button::new("校验"))
                             .clicked()
                         {
@@ -867,7 +874,7 @@ impl F2mcStudioApp {
                                 .add_filter("二进制 BIN", &["bin"])
                                 .save_file()
                             {
-                                self.begin_job(UiCommand::ReadOut { out: p });
+                                self.begin_job(UiCommand::ReadOut { chip_idx: self.chip_idx, out: p });
                             }
                         }
                         if ui

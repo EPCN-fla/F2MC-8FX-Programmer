@@ -137,6 +137,7 @@ fn map_err(e: ProgError) -> String {
 fn cmd_program(image: &str, a: &Args) -> Result<(), String> {
     let img = load_image(image, &a.chip)?;
     let mut client = open_client()?;
+    apply_chip(&mut client, a)?;
     let opts = FlowOptions { write_secure: a.secure, reset_after: a.reset };
     let r = flow::program(&mut client, &img, &opts, &mut on_event, &flow::default_cancel())
         .map_err(map_err)?;
@@ -151,10 +152,18 @@ fn cmd_program(image: &str, a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// 把型号名下发给编程器（固件按系列匹配内嵌 DA，docs/DA 结构解析.md）
+fn apply_chip(client: &mut F2mcClient<Box<dyn DapTransport>>, a: &Args) -> Result<(), String> {
+    client
+        .set_chip(&a.chip)
+        .map_err(|e| format!("SET_CHIP 失败：{e}"))
+}
+
 /// `verify` 子命令：仅校验
 fn cmd_verify(image: &str, a: &Args) -> Result<(), String> {
     let img = load_image(image, &a.chip)?;
     let mut client = open_client()?;
+    apply_chip(&mut client, a)?;
     flow::verify_only(&mut client, &img, &mut on_event, &flow::default_cancel())
         .map_err(map_err)?;
     info("校验通过");
@@ -171,9 +180,22 @@ fn cmd_erase(_a: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// `readout` 子命令：全地址空间读回并保存为 Intel HEX
-fn cmd_readout(out: &str, _a: &Args) -> Result<(), String> {
+/// `recover` 子命令：烧录恢复（强制进入含整循环重试 + 整片擦除）
+///
+/// 用于上次烧录异常（如错配 DA 写坏目标 Flash）导致无法正常烧录时；
+/// 参照 YM02 行为：能进编程模式就能整片擦除重来。
+fn cmd_recover(_a: &Args) -> Result<(), String> {
     let mut client = open_client()?;
+    flow::recover(&mut client, &mut on_event, &flow::default_cancel()).map_err(map_err)?;
+    info("恢复完成");
+    let _ = client.disconnect();
+    Ok(())
+}
+
+/// `readout` 子命令：全地址空间读回并保存为 Intel HEX
+fn cmd_readout(out: &str, a: &Args) -> Result<(), String> {
+    let mut client = open_client()?;
+    apply_chip(&mut client, a)?;
     let data = flow::read_out(
         &mut client,
         READOUT_START,
@@ -328,12 +350,14 @@ fn usage() {
   f2mc-programmer-cli program <image.hex|.mhx> [--chip MB95F636H] [--secure] [--reset|--no-reset]
   f2mc-programmer-cli verify  <image> [--chip MB95F636H]
   f2mc-programmer-cli erase
+  f2mc-programmer-cli recover
   f2mc-programmer-cli readout <out.hex>
 
 OpenOCD 兼容外壳（把本程序当 openocd 调用）：
   f2mc-programmer-cli --openocd -s <dir> -f <cfg> -c \"program app.hex verify reset exit\"
 
-环境变量 F2MC_CHIP 指定默认型号（默认 {DEFAULT_CHIP}）。"
+环境变量 F2MC_CHIP 指定默认型号（默认 {DEFAULT_CHIP}）；型号经 SET_CHIP 下发编程器，
+固件按系列匹配内嵌 DA（docs/DA 结构解析.md）。"
     );
 }
 
@@ -361,6 +385,7 @@ fn main() -> ExitCode {
                     cmd_verify(f, &a)
                 }
                 "erase" => cmd_erase(&a),
+                "recover" => cmd_recover(&a),
                 "readout" => {
                     let f = a.positional.get(1).ok_or("readout 缺输出文件名".to_string())?;
                     cmd_readout(f, &a)

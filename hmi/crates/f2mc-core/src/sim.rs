@@ -44,6 +44,8 @@ pub struct SimProgrammer {
     last_err: u8,
     /// 安全位已写入但未生效（断电复位或 QUIT 后生效）
     pending_lock: bool,
+    /// SET_CHIP 下发的型号名（固件按系列匹配内嵌 DA）
+    pub chip_name: String,
 }
 
 impl Default for SimProgrammer {
@@ -68,6 +70,7 @@ impl SimProgrammer {
             fail_next: 0,
             last_err: 0,
             pending_lock: false,
+            chip_name: String::new(),
         }
     }
 
@@ -100,6 +103,7 @@ impl SimProgrammer {
     /// 命令分发：安全锁门控 → 按命令 ID 执行状态机迁移并组响应帧
     fn handle(&mut self, c: u8, payload: &[u8]) -> Vec<u8> {
         // 安全锁目标：仅握手/整片擦除/L1 查询类命令可用，其余回 0xFD
+        //（SET_CHIP 不触目标，属纯配置命令，不受锁门控）
         if self.locked
             && !matches!(
                 c,
@@ -112,6 +116,7 @@ impl SimProgrammer {
                     | cmd::DISCONNECT
                     | cmd::ABORT
                     | cmd::SET_POWER
+                    | cmd::SET_CHIP
             )
         {
             return Self::resp(StatusCode::SecurityLocked, &[]);
@@ -131,10 +136,7 @@ impl SimProgrammer {
                 Self::resp(StatusCode::Ok, &[])
             }
             cmd::ENTER_PGM => {
-                // 固件门控（cmd.c）：仅 IDLE 可进——QUIT 后的 SYNCED 须先 RESET_RUN
-                if self.state != SimState::Idle {
-                    return Self::resp(StatusCode::StateError, &[]);
-                }
+                // 固件（cmd.c）：任何状态可进——pgmseq 内含完整断电重进
                 if self.locked {
                     // 加锁目标：握手本身可成功（SYNCED），随后时钟切换时收到 0xFD
                     self.state = SimState::Synced;
@@ -238,8 +240,8 @@ impl SimProgrammer {
                     self.pending_lock = false;
                 }
                 self.state = SimState::Idle;
-                // 无复位硬件，固件恒回 UNSUPPORTED 并把状态机复位到 IDLE
-                Self::resp(StatusCode::Unsupported, &[])
+                // 新固件：电源开关模拟复位成功并上报能力 DATA[0]=0x01（兼容模式）
+                Self::resp(StatusCode::Ok, &[0x01])
             }
             cmd::GET_STATE => {
                 let s = match self.state {
@@ -259,9 +261,19 @@ impl SimProgrammer {
                 Self::resp(StatusCode::Ok, &[])
             }
             cmd::SEND_BREAK => Self::resp(StatusCode::Ok, &[]),
+            cmd::SET_CHIP => {
+                // 型号下发（任何状态可用的配置命令）：固件按系列匹配内嵌 DA
+                if payload.is_empty() || payload.len() > 24 {
+                    return Self::resp(StatusCode::BadParam, &[]);
+                }
+                self.chip_name = String::from_utf8_lossy(payload).into_owned();
+                Self::resp(StatusCode::Ok, &[])
+            }
             cmd::DISCONNECT => {
-                // DISCONNECT：断开通知——LED 熄灭 + 状态机复位 IDLE，目标侧状态不变
+                // DISCONNECT：断开通知——LED 熄灭 + 状态机复位 IDLE，目标侧状态不变；
+                // 型号匹配复位默认（对应固件 new8fx_da_clear）
                 self.state = SimState::Idle;
+                self.chip_name.clear();
                 Self::resp(StatusCode::Ok, &[])
             }
             cmd::ABORT => {

@@ -29,6 +29,7 @@ pub mod cmd {
     pub const SEND_BREAK: u8 = 0x10;
     pub const DISCONNECT: u8 = 0x11;
     pub const ABORT: u8 = 0x12;
+    pub const SET_CHIP: u8 = 0x13;
 }
 
 /// 各命令的单条响应等待超时（上位机侧）
@@ -39,7 +40,10 @@ pub mod timeout {
     pub const PING: Duration = Duration::from_secs(1);
     /// SET_POWER：上电含 3 s 上升确认
     pub const SET_POWER: Duration = Duration::from_secs(5);
-    pub const ENTER_PGM: Duration = Duration::from_secs(10);
+    /// ENTER_PGM 须覆盖固件最坏路径：整循环重试 ×3（握手失败时放电→上电→
+    /// 保持→握手重进，参照 YM02 恢复行为）——单次最坏 ~13s（放电≤10s+上电
+    /// ≤3s+稳定≤10s 等不会同时拉满），3 次 ≈ 40s 上限
+    pub const ENTER_PGM: Duration = Duration::from_secs(40);
     pub const ERASE: Duration = Duration::from_secs(90);
     pub const FLASH_INIT: Duration = Duration::from_secs(5);
     pub const WRITE_BEGIN: Duration = Duration::from_secs(1);
@@ -49,18 +53,30 @@ pub mod timeout {
     pub const READ_DATA: Duration = Duration::from_secs(1);
     pub const CR_TRIM_WRITE: Duration = Duration::from_secs(2);
     pub const QUIT: Duration = Duration::from_secs(2);
-    pub const RESET_RUN: Duration = Duration::from_secs(2);
+    /// RESET_RUN：新固件（0.2.0 修订）做真实的断电→放电→上电循环（最坏 ~13s）；
+    /// 旧固件恒回 UNSUPPORTED（秒回，由上位机自行 set_power 兜底）
+    pub const RESET_RUN: Duration = Duration::from_secs(15);
     pub const GET_STATE: Duration = Duration::from_secs(1);
     pub const WRITE_SECURE: Duration = Duration::from_secs(2);
     pub const SEND_BREAK: Duration = Duration::from_secs(1);
     pub const DISCONNECT: Duration = Duration::from_secs(1);
     pub const ABORT: Duration = Duration::from_secs(1);
+    pub const SET_CHIP: Duration = Duration::from_secs(1);
 }
 
 /// 单块写上限（WRITE_BEGIN/DATA/COMMIT 一个事务的总数据量）
 pub const WRITE_BLOCK_MAX: usize = 512;
 /// 单块读上限（READ_BEGIN/DATA 一个事务的总数据量）
 pub const READ_BLOCK_MAX: usize = 1024;
+
+/// 复位能力（RESET_RUN 响应 DATA[0]）：固件按自身硬件自动判定上报
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    /// 原生：复位引脚直接实现
+    Native,
+    /// 模拟：断电+上电实现（兼容模式）
+    Simulated,
+}
 
 /// F2MC-8FX 编程器 L1 客户端（泛型于传输层，真机/模拟器/Mock 可互换）
 pub struct F2mcClient<T: DapTransport> {
@@ -118,8 +134,22 @@ impl<T: DapTransport> F2mcClient<T> {
 
     /// FLASH_INIT(0x05)：初始化目标 Flash 接口并切高速时钟（SYNCED/ERASED 可用），
     /// 成功后进入 RW_MODE。xx/yy 为时钟配置参数（见 new8fx::FLASH_INIT_XX/YY）。
+    /// DA 由固件内嵌表按 SET_CHIP 下发的型号匹配（docs/DA 结构解析.md）。
     pub fn flash_init(&mut self, xx: u8, yy: u8) -> Result<()> {
         vendor::transact(&mut self.t, cmd::FLASH_INIT, &[xx, yy], Some(0), timeout::FLASH_INIT)?;
+        Ok(())
+    }
+
+    /// SET_CHIP(0x13)：下发型号名（如 "MB95F698K"），固件按系列匹配内嵌 DA。
+    /// 每次操作前调用一次即可（固件在 DISCONNECT 前保持匹配结果）。
+    pub fn set_chip(&mut self, chip_name: &str) -> Result<()> {
+        vendor::transact(
+            &mut self.t,
+            cmd::SET_CHIP,
+            chip_name.as_bytes(),
+            Some(0),
+            timeout::SET_CHIP,
+        )?;
         Ok(())
     }
 
@@ -191,11 +221,15 @@ impl<T: DapTransport> F2mcClient<T> {
 
     /// RESET_RUN(0x0D)：复位目标运行用户程序。
     ///
-    /// @note 编程器无复位硬件，固件恒回 UNSUPPORTED 并把状态机复位到 IDLE——
-    /// 该错误码属预期，调用侧应容错（见 flow::reset_run_graceful）。
-    pub fn reset_run(&mut self) -> Result<()> {
-        vendor::transact(&mut self.t, cmd::RESET_RUN, &[], Some(0), timeout::RESET_RUN)?;
-        Ok(())
+    /// @note 新固件（0.2.0 修订）经电源开关做真实的断电→主动放电→上电循环，
+    /// 响应 DATA[0] 上报复位能力（ResetMode）；旧固件恒回 UNSUPPORTED 并把
+    /// 状态机复位到 IDLE——该错误码属预期，调用侧应容错（见 flow::reset_run_graceful）。
+    pub fn reset_run(&mut self) -> Result<ResetMode> {
+        let r = vendor::transact(&mut self.t, cmd::RESET_RUN, &[], Some(1), timeout::RESET_RUN)?;
+        Ok(match r.first().copied().unwrap_or(0x01) {
+            0x00 => ResetMode::Native,
+            _ => ResetMode::Simulated,
+        })
     }
 
     /// GET_STATE(0x0E)：查询状态机。
@@ -331,6 +365,17 @@ mod tests {
             .count();
         assert_eq!(n_enter, 1, "status error must not retry");
         let _ = mock;
+    }
+
+    /// set_chip 把型号名下发给固件（固件按系列匹配内嵌 DA）
+    #[test]
+    fn set_chip_sends_model_name() {
+        let mut client = F2mcClient::new(SimProgrammer::new());
+        client.set_chip("MB95F698K").unwrap();
+        assert_eq!(client.transport_mut().chip_name, "MB95F698K");
+        let log = &client.transport_mut().frame_log;
+        let f = log.iter().find(|f| f[1] == cmd::SET_CHIP).unwrap();
+        assert_eq!(&f[4..], b"MB95F698K");
     }
 
     /// 状态机防呆：SYNCED 态发 WRITE_BEGIN → STATE_ERROR
