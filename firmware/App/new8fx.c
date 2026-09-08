@@ -21,6 +21,7 @@
 #include "drv_pin.h"
 #include "main.h"
 #include <rtthread.h>
+#include <string.h>
 
 /** @name L2 ACK 值
  * @{ */
@@ -51,23 +52,92 @@
                                      * 足够，失败路径 ENTER_PGM 全程 ~6.5s < 上位机 10s 超时 */
 #define L2_RETRY_MAX        3U      /**< 固件使用说明 §2.8 */
 
-/**
- * @brief INIT DA.BIN（141 字节）
- * @note 抓取自 YM02 编程器对 MB95630H 的实际上传（sniff_62500.txt）；
- * 与 Spec Table 7-1 的 198B 版本不同——该版本在真机上 RW 阶段行为异常
- * （DA 对所有读沉默），YM02 版本实测可用。XX=0x02（RW 500K）已就位。
- */
-static const uint8_t INIT_DA_BIN[141] = {
-    0xF1,0xD4,0x01,0x1D,0x05,0x7C,0x61,0x01,0x1F,0xE5,0x01,0x60,0x41,0xF3,0x40,0x70,
+/* ------------------------------------------------------------------ */
+/* INIT DA.BIN（固件内嵌，上位机经 SET_CHIP 下发型号名，固件按系列匹配）          */
+/*                                                                     */
+/* ⚠ DA 与目标 boot ROM 常驻监视器布局严格配对（DA 内含跳进监视器的绝对      */
+/* 地址与 CALLV 向量，两版监视器入口相差 8 字节）——结构逆向与实测配对结论     */
+/* 见 docs/DA 结构解析.md。                                              */
+/* ------------------------------------------------------------------ */
+
+/** @brief Spec V1.3.0 Table 7-1 文档版（198B，监视器 M1；XX=0x02/YY=0x7C 已代入）。
+ *  实测：MB95F698K（690K）烧录/读取正常；MB95F636K（630H）复测烧录/读取正常。当前默认版本。 */
+static const uint8_t DA_SPEC_M1[198] = {
+    0xF1,0xD4,0x01,0x56,0x05,0x7C,0x61,0x01,0x58,0xE5,0x01,0x60,0x41,0xF3,0x40,0x70,
     0x40,0xE4,0x70,0x30,0x71,0x04,0x00,0xEA,0x85,0x26,0x02,0xE9,0x10,0xE9,0xE3,0xE9,
-    0x4F,0xE9,0x48,0xE9,0x49,0x99,0xFF,0xFD,0x29,0x99,0x88,0xFD,0x4E,0x05,0x7C,0x64,
-    0xCF,0x45,0x7C,0x98,0x00,0xFD,0x0F,0xD8,0xE4,0x00,0xD1,0x40,0xE4,0xFF,0xD4,0x93,
-    0xE0,0xF2,0xEA,0x21,0x00,0xC3,0x9F,0x00,0xFD,0x05,0xDF,0xD8,0x21,0x00,0xC8,0x21,
-    0x00,0xAB,0x05,0x7C,0x64,0xCF,0x45,0x7C,0xAE,0x0C,0x98,0x00,0xFD,0x0F,0xD8,0xE9,
-    0xE2,0xE4,0x00,0xFA,0x40,0xE4,0xFF,0xE0,0x93,0xE0,0x21,0x00,0xEA,0x9F,0x00,0xFD,
-    0x05,0xDF,0xD8,0x21,0x00,0xEF,0xA6,0x0C,0x21,0x00,0xAB,0x50,0x71,0x50,0xE3,0x51,
-    0xC4,0x01,0x1D,0xE1,0x60,0x01,0x1F,0x45,0x7C,0x85,0x26,0x02,0x20,
+    0x4F,0xE9,0x48,0xE9,0x49,0x99,0xFF,0xFD,0x31,0x99,0xAA,0xFD,0x56,0x99,0x55,0xFD,
+    0x69,0x99,0x88,0xFD,0x7F,0x05,0x7C,0x64,0xCF,0x45,0x7C,0x98,0x00,0xFD,0x0F,0xD8,
+    0xE4,0x00,0xD9,0x40,0xE4,0xFF,0xD4,0x93,0xE0,0xF2,0xEA,0x21,0x00,0xCB,0x9F,0x00,
+    0xFD,0x05,0xDF,0xD8,0x21,0x00,0xD0,0x21,0x00,0xAB,0x05,0x7C,0x64,0xCF,0x45,0x7C,
+    0xAE,0x0C,0x98,0x00,0xFD,0x0F,0xD8,0xE9,0xE2,0xE4,0x01,0x02,0x40,0xE4,0xFF,0xE0,
+    0x93,0xE0,0x21,0x00,0xF2,0x9F,0x00,0xFD,0x05,0xDF,0xD8,0x21,0x00,0xF7,0xA6,0x0C,
+    0x21,0x00,0xAB,0x05,0x7C,0x64,0xCF,0x45,0x7C,0xF3,0xE2,0xE4,0x01,0x24,0x40,0xE4,
+    0xFF,0xDE,0x93,0xE0,0x05,0x81,0xEA,0x21,0x00,0xAB,0x05,0x7C,0x64,0xCF,0x45,0x7C,
+    0xAE,0x0C,0x04,0x00,0x10,0x08,0xE2,0xE4,0x01,0x3F,0x40,0xE4,0xFD,0xDF,0xE0,0xA6,
+    0x0C,0x21,0x00,0xAB,0x50,0x71,0x50,0xE3,0x51,0xC4,0x01,0x56,0xE1,0x60,0x01,0x58,
+    0x45,0x7C,0x85,0x26,0x02,0x20,
 };
+
+/** @brief 系列 → DA 匹配表项（系列号 = 型号名 "MB95F" 后两位数字） */
+typedef struct {
+    const char    *series;      /**< 两位系列号字符串，如 "69" */
+    const uint8_t *da;
+    uint16_t       da_len;
+} da_entry_t;
+
+/**
+ * @brief 系列匹配表：未命中走默认（DA_SPEC_M1）。
+ * @note  实测：F69x（690K）必须 Spec 版；F63x（630H）两版皆可。
+ *        新型号失败时用 firmware/Test/dbg_sniff.py 嗅探 YM02 补新变体。
+ */
+static const da_entry_t DA_TABLE[] = {
+    {"69", DA_SPEC_M1, (uint16_t)sizeof(DA_SPEC_M1)},
+    {"63", DA_SPEC_M1, (uint16_t)sizeof(DA_SPEC_M1)},
+};
+
+static const uint8_t *s_da      = DA_SPEC_M1;                   /**< 当前 DA（默认 Spec 版） */
+static uint16_t       s_da_len  = (uint16_t)sizeof(DA_SPEC_M1);
+
+void new8fx_set_chip(const uint8_t *name, uint16_t len)
+{
+    char chip[25];
+    uint16_t i;
+
+    if ((name == NULL) || (len == 0U) || (len >= sizeof(chip)))
+        return;
+    memcpy(chip, name, len);
+    chip[len] = '\0';
+
+    /* 系列号 = "MB95F" 之后两位（如 MB95F698K → "69"）；格式不符则用默认 */
+    s_da     = DA_SPEC_M1;
+    s_da_len = (uint16_t)sizeof(DA_SPEC_M1);
+    if ((len >= 7U) && (memcmp(chip, "MB95F", 5U) == 0))
+    {
+        for (i = 0U; i < (uint16_t)(sizeof(DA_TABLE) / sizeof(DA_TABLE[0])); i++)
+        {
+            if ((chip[5] == DA_TABLE[i].series[0]) && (chip[6] == DA_TABLE[i].series[1]))
+            {
+                s_da     = DA_TABLE[i].da;
+                s_da_len = DA_TABLE[i].da_len;
+                break;
+            }
+        }
+    }
+    LOGI("set_chip: %s -> DA %u bytes\n", chip, (unsigned)s_da_len);
+}
+
+void new8fx_da_clear(void)
+{
+    s_da     = DA_SPEC_M1;
+    s_da_len = (uint16_t)sizeof(DA_SPEC_M1);
+}
+
+/** @brief 当前生效 DA（由 SET_CHIP 匹配；未匹配/未下发为默认 Spec 版） */
+static const uint8_t *da_active(uint16_t *len)
+{
+    *len = s_da_len;
+    return s_da;
+}
 
 /* ------------------------------------------------------------------ */
 /* 基础原语                                                             */
@@ -242,7 +312,9 @@ static uint8_t erase_fire(uint16_t addr)
 }
 
 /**
- * @brief FLASH_INIT 实体（固件使用说明 §2.5）：3 头帧 + 141 帧 DA.BIN + 尾帧，随后切 500K
+ * @brief FLASH_INIT 实体（固件使用说明 §2.5）：3 头帧 + N 帧 DA.BIN + 尾帧，随后切 500K
+ * @note DA 由固件内嵌表按 SET_CHIP 下发的型号匹配（默认 Spec-198B）；
+ *       结构与配对依据见 docs/DA 结构解析.md。
  * @note 失败日志带 exti_delta/lvl 诊断：delta=0=DA 沉默；delta>0=RX 丢帧
  */
 static uint8_t op_flash_init(void *arg)
@@ -251,10 +323,13 @@ static uint8_t op_flash_init(void *arg)
     static const uint8_t f2[4] = {0x05, 0x00, 0x60, 0x65};
     static const uint8_t f3[4] = {0x00, 0x00, 0x90, 0x90};
     static const uint8_t ft[4] = {0x0A, 0x00, 0x00, 0x0A};
+    const uint8_t *da;
+    uint16_t da_len;
     uint8_t st;
     uint16_t i;
 
     RT_UNUSED(arg);
+    da = da_active(&da_len);
 
     st = cmd_frame(f1, GAP_NONE_US, ACK_TO_NORMAL_MS);
     if (st != L1_ST_OK) return st;
@@ -263,16 +338,16 @@ static uint8_t op_flash_init(void *arg)
     st = cmd_frame(f3, GAP_NONE_US, ACK_TO_NORMAL_MS);
     if (st != L1_ST_OK) return st;
 
-    for (i = 0U; i < (uint16_t)sizeof(INIT_DA_BIN); i++)
+    for (i = 0U; i < da_len; i++)
     {
-        uint8_t fr[4] = {0x03, 0x00, INIT_DA_BIN[i],
-                         (uint8_t)(0x03 + 0x00 + INIT_DA_BIN[i])};
+        uint8_t fr[4] = {0x03, 0x00, da[i],
+                         (uint8_t)(0x03 + 0x00 + da[i])};
         rt_uint32_t ex0 = wire_exti_hit_count();   /* 诊断：失败时分辨 DA 沉默/RX 丢帧 */
         st = cmd_frame(fr, GAP_NONE_US, ACK_TO_NORMAL_MS);
         if (st != L1_ST_OK)
         {
             LOGE("flash_init: bin[%u]=%02x st=%02x exti_delta=%lu lvl=%d\n",
-                 (unsigned)i, (unsigned)INIT_DA_BIN[i], (unsigned)st,
+                 (unsigned)i, (unsigned)da[i], (unsigned)st,
                  (unsigned long)(wire_exti_hit_count() - ex0),
                  (int)rt_pin_read(DBG_RX_PIN));
             return st;
@@ -331,19 +406,34 @@ static uint8_t op_cr_trim(void *arg)
 /* 对外 API                                                              */
 /* ------------------------------------------------------------------ */
 
+/** @brief ENTER_PGM 整循环重试次数：握手失败时重进（放电→上电→保持→握手）。
+ *  大 die 目标（F698K）偶发 boot ROM 错过 DBG 采样窗口/POR 边际失败——
+ *  整循环重试等价于人工断电重试（参照 YM02 恢复行为），显著放大进入成功率 */
+#define ENTER_RETRY_MAX     3U
+
 uint8_t new8fx_enter_pgm(void)
 {
-    uint8_t st;
+    uint8_t st = L1_ST_OK;
+    uint8_t attempt;
 
     /* QUIT/上次会话可能把 wire 停在 500K；目标重新上电后只说 62500，
      * 必须显式归位，否则握手 200 次重试死等 ~5 秒（实测）。 */
     wire_set_baud(WIRE_BAUD_62500);
 
-    st = pgmseq_enter();          /* F3 电气时序（62500 已就位） */
-    if (st != L1_ST_OK)
-        return st;
+    for (attempt = 0U; attempt < ENTER_RETRY_MAX; attempt++)
+    {
+        st = pgmseq_enter();          /* F3 电气时序（62500 已就位） */
+        if (st != L1_ST_OK)
+            return st;                /* 放电超时/电源故障/ABORT：不重试 */
 
-    st = handshake();
+        st = handshake();
+        if (st == L1_ST_ABORTED)
+            return st;
+        if (st == L1_ST_OK)
+            break;                    /* 握手成功 */
+        LOGW("enter_pgm: handshake failed, cycle retry %u/%u\n",
+             (unsigned)(attempt + 1U), (unsigned)ENTER_RETRY_MAX);
+    }
     if (st != L1_ST_OK)
         return st;
 

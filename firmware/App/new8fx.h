@@ -19,8 +19,21 @@
 uint8_t new8fx_enter_pgm(void);
 /** @brief 预 init 擦除（固件使用说明 §2.4，62500；整片 Addr=0x0000，f3 单发等 ≤60s） */
 uint8_t new8fx_erase_preinit(uint16_t addr);
-/** @brief 下载 INIT_DA_BIN（固件使用说明 §2.5，YM02 141B 版本）并切 500K */
+/** @brief 下载 DA 并切 500K（固件使用说明 §2.5；DA 由固件内嵌表按型号匹配） */
 uint8_t new8fx_flash_init(void);
+
+/**
+ * @name DA 型号匹配（通信协议约定 §3.1 SET_CHIP）
+ * DA 与目标 boot ROM 常驻监视器布局严格配对——固件内嵌 DA 表
+ * （DA_SPEC_M1 / DA_YM02_M1，见 docs/DA 结构解析.md），上位机经
+ * SET_CHIP 下发型号名（如 "MB95F698K"），按系列匹配；未匹配/未下发
+ * 时用默认（Spec-198B）。
+ * @{ */
+/** @brief 下发型号名并匹配 DA（name 为原始 ASCII，无需 NUL 结尾） */
+void new8fx_set_chip(const uint8_t *name, uint16_t len);
+/** @brief 型号匹配复位到默认（DISCONNECT 时调用） */
+void new8fx_da_clear(void);
+/** @} */
 /** @brief 读写模式内擦除（固件使用说明 §2.4，500K；整片 Addr=0x0000） */
 uint8_t new8fx_erase_post(uint16_t addr);
 /** @brief 写闪存（固件使用说明 §2.6；150µs/字节节拍，写后等 10ms DA 忙期） */
