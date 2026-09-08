@@ -16,3 +16,6 @@
 /.vscode
 *.clang-format
 *.code-workspace
+
+# Test tools
+test
