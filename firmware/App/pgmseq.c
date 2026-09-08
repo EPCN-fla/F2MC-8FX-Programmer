@@ -7,8 +7,9 @@
  * 拉低，目标进用户模式，永远无法进入 PGM。
  *
  * 五步流程（F2MC-LINK v1.1 起上电/断电由固件经 PWR_EN 自动控制，零手动）：
- *   1. 目标仍带电（>2.5V）→ 自动断电并等放电（<0.5V），超时报错；
- *   2. PB14 推挽输出低；
+ *   1. 目标仍带电（>2.5V）→ PB14 推挽拉低（经目标侧 2.2k 上拉主动泄放目标轨，
+ *      防大 die 目标放电不净 POR 失败）→ 自动断电并等放电（<0.5V）；
+ *   2. PB14 推挽输出低（步骤 1 已拉低时为幂等）；
  *   3. 自动上电（pwr_switch，3s 上升确认，失败自动关断）；
  *   3b. 等 VCC 稳定（连续 3 次采样变化 <100mV）；
  *   4. 精确定时 1.2 s（DBG 低覆盖 VCC 上升且 ≥1 s，留裕量）；
@@ -27,29 +28,46 @@
 
 #define DBG_HOLD_MS             1200U   /**< Spec 要求 ≥1 s，取 1.2 s 裕量 */
 #define DISCHARGE_TIMEOUT_MS    10000U  /**< 等目标电容放电 10 s */
+#define DISCHARGE_DWELL_MS      300U    /**< 放电达标后继续保持断电的时长：
+                                         *   外部轨 ≤0.5V 时大 die 目标内部轨可能
+                                         *   仍高于 VPOR（实测 F698K 曾因此 POR 不净、
+                                         *   DA 残留 500K 态致握手 200 次超时），
+                                         *   保持 300ms 确保内部放电深度 */
 
 uint8_t pgmseq_enter(void)
 {
     LOGI("pgmseq: enter");
 
-    /* 1. 目标必须处于断电状态：仍带电则自动断电并等放电（目标电容泄放需时间） */
+    /* 1. 目标必须处于断电状态：仍带电则自动断电并等放电（目标电容泄放需时间）。
+     *    ⚠ 放电期间主动把 DBG 推挽拉低：DBG 经目标侧 2.2k 上拉接目标 VCC
+     *    （开关后），拉低即以 ~2.3mA@5V 主动泄放目标轨——大 die/大电容目标
+     *    仅靠芯片漏电 + 9.4k 分压（~0.5mA）放电又慢又浅，实测 10s 放不到
+	 *    0.5V 以下 → 放电超时，或掉电不深 POR 不干净 → 握手 200 次重试后
+	 *    TIMEOUT。小 die 放电快故无此问题。DBG 在断电前拉低同时满足 Spec
+	 *    “上电前 DBG 已为低”，无副作用。 */
     if (pwr_vcc_mv() >= VCC_ON_MV)
     {
         rt_err_t wrc;
         LOGI("target still powered (%lu mV), switching off",
              (unsigned long)pwr_vcc_mv());
+        rt_pin_mode(DBG_TX_PIN, PIN_MODE_OUTPUT);   /* 推挽拉低：主动泄放目标轨 */
+        rt_pin_write(DBG_TX_PIN, PIN_LOW);
         (void)pwr_switch(RT_FALSE);
         wrc = pwr_wait_off(DISCHARGE_TIMEOUT_MS);
         if (wrc == PWR_E_ABORT)
         {
+            rt_pin_mode(DBG_TX_PIN, PIN_MODE_INPUT);   /* 已驱动 PB14，须释放 */
             LOGW("pgmseq: aborted (wait off)");
             return L1_ST_ABORTED;
         }
         if (wrc != RT_EOK)
         {
-            LOGE("target not discharged");
+            rt_pin_mode(DBG_TX_PIN, PIN_MODE_INPUT);
+            LOGE("target not discharged (VCC=%lu mV)",
+                 (unsigned long)pwr_vcc_mv());
             return L1_ST_TIMEOUT;
         }
+        rt_thread_mdelay(DISCHARGE_DWELL_MS);   /* 保持断电 300ms，保证内部 POR 深度 */
     }
 
     /* 2. 上电前拉低 DBG（PB14 推挽输出低） */
@@ -119,4 +137,39 @@ uint8_t pgmseq_enter(void)
     LOGI("DBG released, enter-pgm sequence done");
 
     return L1_ST_OK;
+}
+
+/**
+ * @brief 复位运行（无 RST 引脚，用目标电源开关实现）：断电 → 主动放电 → 上电
+ * @note  ⚠ 不可只断电几百 ms：大 die/大电容目标放电慢，浅掉电不触发 POR，
+ *        目标根本没复位（boot/DA 态继续跑，用户程序不运行）。
+ *        放电措施与 pgmseq_enter 步骤 1 相同（DBG 拉低经 2.2k 主动泄放）。
+ * @return L1_ST_OK / L1_ST_TIMEOUT（放电超时）/ L1_ST_PWR_FAULT（上电失败）
+ */
+uint8_t pgmseq_power_cycle_run(void)
+{
+    rt_err_t wrc;
+
+    LOGI("pgmseq: power-cycle run");
+    rt_pin_mode(DBG_TX_PIN, PIN_MODE_OUTPUT);   /* 推挽拉低：经 2.2k 主动泄放目标轨 */
+    rt_pin_write(DBG_TX_PIN, PIN_LOW);          /*（仅断电期拉低；上电前须释放，
+                                                * 否则目标会进 PGM 而非运行用户程序）*/
+    (void)pwr_switch(RT_FALSE);
+    wrc = pwr_wait_off(DISCHARGE_TIMEOUT_MS);       /* 等 VCC <0.5V */
+    if (wrc == PWR_E_ABORT)
+    {
+        rt_pin_mode(DBG_TX_PIN, PIN_MODE_INPUT);
+        LOGW("pgmseq: aborted (power-cycle)");
+        return L1_ST_ABORTED;
+    }
+    if (wrc != RT_EOK)
+    {
+        rt_pin_mode(DBG_TX_PIN, PIN_MODE_INPUT);
+        LOGE("reset_run: target not discharged (VCC=%lu mV)",
+             (unsigned long)pwr_vcc_mv());
+        return L1_ST_TIMEOUT;
+    }
+    rt_thread_mdelay(DISCHARGE_DWELL_MS);           /* 保持断电 300ms，保证 POR 深度 */
+    rt_pin_mode(DBG_TX_PIN, PIN_MODE_INPUT);        /* 释放 DBG（上拉成形高） */
+    return pwr_switch(RT_TRUE);                     /* 上电（3s 上升确认） */
 }

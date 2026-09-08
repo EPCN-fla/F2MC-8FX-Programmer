@@ -13,6 +13,7 @@
 #include "cmd.h"
 #include "vendor.h"
 #include "new8fx.h"
+#include "pgmseq.h"
 #include "pwr.h"
 #include "wire.h"
 #include "led.h"
@@ -114,8 +115,10 @@ static uint8_t cmd_execute_inner(uint8_t cmd, const uint8_t *payload,
 
     case L1_CMD_DISCONNECT:
         /* 上位机断开通知（通信协议约定 §3.1）：LED 熄灭 + 状态机复位 IDLE。
-         * 目标侧状态不变；重连后从 ENTER_PGM 重新开始。 */
+         * 目标侧状态不变；重连后从 ENTER_PGM 重新开始。DA 型号匹配复位到
+         * 默认（避免上个会话的型号数据误用；重连后上位机重新 SET_CHIP）。 */
         g_state = PROG_ST_IDLE;
+        new8fx_da_clear();
         led_notify_host_disconnect();
         return L1_ST_OK;
 
@@ -138,21 +141,45 @@ static uint8_t cmd_execute_inner(uint8_t cmd, const uint8_t *payload,
         }
 
     case L1_CMD_RESET_RUN:
-        /* 无 RST 引脚（PA1 已舍弃）：恒 UNSUPPORTED，状态机复位 IDLE。
-         * 上位机应提示用户手动断电重启。 */
+        /* 无 RST 引脚（PA1 已舍弃）：用目标电源开关复位运行——断电→主动放电
+         *（DBG 拉低经 2.2k 泄放，等 VCC<0.5V 保证 POR 深度）→上电。
+         * ⚠ 不可只断电几百 ms：大 die 目标（F698K）放电慢，浅掉电不触发
+         * POR，目标根本没复位（boot/DA 态继续跑，用户程序不运行）。
+         * 响应 DATA[0] = 复位能力：0=原生（复位引脚）/ 1=模拟（断电+上电，
+         * 兼容模式）——本板恒为模拟；更旧固件恒回 UNSUPPORTED（上位机
+         * 自行 set_power 断电上电兜底）。 */
         g_state = PROG_ST_IDLE;
-        return L1_ST_UNSUPPORTED;
+        {
+            uint8_t st = pgmseq_power_cycle_run();
+            if (st == L1_ST_OK)
+            {
+                rsp[0] = PGMSEQ_RST_CAP;
+                *rsp_len = 1U;
+            }
+            return set_err(st);
+        }
 
     case L1_CMD_SEND_BREAK:
         /* 通信恢复手段（固件使用说明 §2.8），任何状态可用 */
         wire_send_break();
         return L1_ST_OK;
 
+    /* ---- 型号下发（任何状态可用的配置命令，不入引擎 LED 快闪） ---- */
+
+    case L1_CMD_SET_CHIP:
+        /* [型号名 ASCII ≤24B]（如 "MB95F698K"）：固件按系列匹配内嵌 DA
+         *（new8fx_set_chip，docs/DA 结构解析.md）；FLASH_INIT 用匹配结果 */
+        if ((len == 0U) || (len > 24U))
+            return L1_ST_BAD_PARAM;
+        new8fx_set_chip(payload, len);
+        return L1_ST_OK;
+
     /* ---- 编程流程 ---- */
 
     case L1_CMD_ENTER_PGM:
-        if (g_state != PROG_ST_IDLE)
-            return set_err(L1_ST_STATE_ERROR);
+        /* 任何状态可进：pgmseq 内含完整断电→放电→上电循环（电气上即完整重进），
+         * 无需上位机先 RESET_RUN/QUIT 归位——带电重进路径因此不再依赖
+         * QUIT 帧（DA 退出）与多余电源循环，规避"保持编程模式后再烧录卡死"。 */
         {
             uint8_t st = new8fx_enter_pgm();
             /* 握手成功即 SYNCED——安全锁目标（clock_mod 回 0xFD）也允许
