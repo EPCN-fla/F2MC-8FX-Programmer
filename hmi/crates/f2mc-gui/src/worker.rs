@@ -50,10 +50,12 @@ pub enum UiCommand {
     Program(JobCfg),
     /// 仅整片擦除
     EraseOnly,
+    /// 烧录恢复（强制进入 + 整片擦除；用于烧录异常后目标无法正常烧录时）
+    Recover,
     /// 仅校验
     VerifyOnly(JobCfg),
     /// 全地址空间读回并保存到文件
-    ReadOut { out: PathBuf },
+    ReadOut { chip_idx: usize, out: PathBuf },
     /// 复位目标运行用户程序
     ResetRun,
     /// 目标电源开关（F2MC-LINK v1.1）：true=上电 / false=断电（断电使固件状态机复位 IDLE）
@@ -149,6 +151,17 @@ fn finish(tx: &Sender<UiEvent>, ctx: &egui::Context, r: CoreResult<()>, ok_msg: 
         ),
         Err(e) => send(tx, ctx, UiEvent::Failed(format!("{e}"))),
     }
+}
+
+/// 把型号名下发给编程器（固件按系列匹配内嵌 DA，docs/DA 结构解析.md）
+fn apply_chip(
+    client: &mut Client,
+    chip: &f2mc_core::ChipDef,
+    tx: &Sender<UiEvent>,
+    ctx: &egui::Context,
+) -> CoreResult<()> {
+    send(tx, ctx, UiEvent::Log(format!("目标型号：{}", chip.name)));
+    client.set_chip(&chip.name)
 }
 
 /// 后台工作线程句柄：接收 UI 命令、执行烧录流程、回发 UI 事件
@@ -297,16 +310,27 @@ impl Worker {
                 };
                 finish(&tx, &ctx, r, "擦除完成");
             }
+            UiCommand::Recover => {
+                let r = match self.client() {
+                    Ok(c) => flow::recover(c, &mut |e| forward(&tx, &ctx, e), &cancel),
+                    Err(e) => Err(e),
+                };
+                finish(&tx, &ctx, r, "恢复完成（目标已整片擦除，可正常烧录）");
+            }
             UiCommand::VerifyOnly(job) => {
                 let r = self.run_verify(&job);
                 finish(&tx, &ctx, r, "校验通过");
             }
-            UiCommand::ReadOut { out } => {
+            UiCommand::ReadOut { chip_idx, out } => {
                 // 全地址空间读取（0x1000~0xFFFF，含下 bank）
                 let start = 0x1000u16;
                 let len = (0x10000 - 0x1000) as usize;
                 let r = match self.client() {
-                    Ok(c) => flow::read_out(c, start, len, &mut |e| forward(&tx, &ctx, e), &cancel),
+                    Ok(c) => {
+                        let chip = &chips()[chip_idx.min(chips().len() - 1)];
+                        apply_chip(c, chip, &tx, &ctx)
+                            .and_then(|_| flow::read_out(c, start, len, &mut |e| forward(&tx, &ctx, e), &cancel))
+                    }
                     Err(e) => Err(e),
                 };
                 match r {
@@ -322,11 +346,20 @@ impl Worker {
                 }
             }
             UiCommand::ResetRun => {
+                // 复位能力由固件上报：模拟（断电+上电）时提示兼容模式
                 let r = match self.client() {
-                    Ok(c) => c.reset_run(),
+                    Ok(c) => c.reset_run().map(|mode| match mode {
+                        f2mc_core::ResetMode::Native => "已复位运行".to_string(),
+                        f2mc_core::ResetMode::Simulated => {
+                            "已复位运行（当前为兼容模式：断电+上电模拟复位）".to_string()
+                        }
+                    }),
                     Err(e) => Err(e),
                 };
-                finish(&tx, &ctx, r, "已复位运行");
+                match r {
+                    Ok(msg) => send(&tx, &ctx, UiEvent::Done(msg)),
+                    Err(e) => finish(&tx, &ctx, Err(e), ""),
+                }
             }
             UiCommand::SetPower(on) => {
                 let r = match self.client() {
@@ -417,6 +450,7 @@ impl Worker {
         let client = self.client()?;
 
         let chip = &chips()[job.chip_idx.min(chips().len() - 1)];
+        apply_chip(client, chip, &tx, &ctx)?;
         let text = std::fs::read_to_string(&job.hex_path)?;
         let img = hexfile::parse(&text, chip)?;
         for w in &img.warnings {
@@ -444,6 +478,7 @@ impl Worker {
         let client = self.client()?;
 
         let chip = &chips()[job.chip_idx.min(chips().len() - 1)];
+        apply_chip(client, chip, &tx, &ctx)?;
         let text = std::fs::read_to_string(&job.hex_path)?;
         let img = hexfile::parse(&text, chip)?;
         flow::verify_only(client, &img, &mut |e| forward(&tx, &ctx, e), &cancel)

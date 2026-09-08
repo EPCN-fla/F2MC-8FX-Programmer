@@ -27,6 +27,7 @@ pub enum Stage {
     CrTrim,
     Write,
     Verify,
+    Read,
     Secure,
     Quit,
     ResetRun,
@@ -43,6 +44,7 @@ impl Stage {
             Stage::CrTrim => "CR 校准检查",
             Stage::Write => "写入",
             Stage::Verify => "校验",
+            Stage::Read => "读取",
             Stage::Secure => "写入安全位",
             Stage::Quit => "完成",
             Stage::ResetRun => "完成",
@@ -136,18 +138,10 @@ pub fn program<T: DapTransport>(
     cb(FlowEvent::Log(format!("PING: {id}, fw={:?}", client.fw_version)));
     check_cancel(cancel)?;
 
-    // --- 到 SYNCED（会话保持时跳过 ENTER_PGM；安全锁自动解锁一次）---
+    // --- 到 SYNCED（固件 ENTER_PGM 任何状态可进，pgmseq 内含完整断电重进）---
     cb(FlowEvent::StageStart(Stage::EnterPgm));
     match session_begin_synced(client, &mut *cb, cancel) {
-        Ok(locked_hint) => {
-            // SYNCED 快捷路径无法感知锁：用 GET_STATE 的 last_error 判断
-            if locked_hint {
-                cb(FlowEvent::Warn(
-                    "目标已加安全锁（last_error=0x02），整片擦除将自动解锁".into(),
-                ));
-                report.unlocked = true;
-            }
-        }
+        Ok(()) => {}
         Err(ProgError::SecurityLocked) => {
             cb(FlowEvent::Warn("目标已加安全锁，执行整片擦除解锁后重试".into()));
             erase_with_recovery(client, 0x0000, &mut *cb, cancel)?;
@@ -238,11 +232,7 @@ pub fn erase_only<T: DapTransport>(
     client.ping()?;
     cb(FlowEvent::StageStart(Stage::EnterPgm));
     match session_begin_synced(client, &mut *cb, cancel) {
-        Ok(locked_hint) => {
-            if locked_hint {
-                cb(FlowEvent::Warn("目标已加安全锁，整片擦除将同时解锁".into()));
-            }
-        }
+        Ok(()) => {}
         // 安全锁目标：ENTER_PGM 后已在 SYNCED，整片擦除本身就是解锁手段
         Err(ProgError::SecurityLocked) => {
             cb(FlowEvent::Warn("目标已加安全锁，整片擦除将同时解锁".into()));
@@ -253,6 +243,32 @@ pub fn erase_only<T: DapTransport>(
     erase_with_recovery(client, 0x0000, &mut *cb, cancel)?;
     cb(FlowEvent::Log("保持 SYNCED：可连续执行下一步操作".into()));
     cb(FlowEvent::StageStart(Stage::Quit)); // 完成标记
+    Ok(())
+}
+
+/// 烧录恢复：强制进入（固件内含整循环重试）→ 整片擦除。
+/// 用于上次烧录异常（如错配 DA 写坏目标 Flash）导致无法正常烧录时的恢复
+/// （参照 YM02：能进模式就能整片擦除重来）。结束后保持 SYNCED。
+pub fn recover<T: DapTransport>(
+    client: &mut F2mcClient<T>,
+    cb: &mut dyn FnMut(FlowEvent),
+    cancel: &CancelToken,
+) -> Result<()> {
+    cb(FlowEvent::StageStart(Stage::Ping));
+    client.ping()?;
+    cb(FlowEvent::StageStart(Stage::EnterPgm));
+    // 恢复场景不问锁态：加锁目标整片擦除即解锁
+    match session_begin_synced(client, &mut *cb, cancel) {
+        Ok(()) => {}
+        Err(ProgError::SecurityLocked) => {
+            cb(FlowEvent::Warn("目标已加安全锁，恢复过程将整片擦除解锁".into()));
+        }
+        Err(e) => return Err(e),
+    }
+    cb(FlowEvent::StageStart(Stage::Erase));
+    erase_with_recovery(client, 0x0000, &mut *cb, cancel)?;
+    cb(FlowEvent::Log("恢复完成：目标已整片擦除，可正常烧录".into()));
+    cb(FlowEvent::StageStart(Stage::Quit));
     Ok(())
 }
 
@@ -289,12 +305,13 @@ pub fn read_out<T: DapTransport>(
     cb(FlowEvent::StageStart(Stage::EnterPgm));
     session_begin_rw(client, &mut *cb, cancel)?;
 
+    cb(FlowEvent::StageStart(Stage::Read));
     let mut out = Vec::with_capacity(len);
     while out.len() < len {
         let n = (len - out.len()).min(READ_BLOCK_MAX);
         let chunk = client.read_block(start + out.len() as u16, n)?;
         out.extend_from_slice(&chunk);
-        cb(FlowEvent::Progress(Stage::Verify, out.len(), len));
+        cb(FlowEvent::Progress(Stage::Read, out.len(), len));
         check_cancel(cancel)?;
     }
     cb(FlowEvent::Log("保持读写模式：可连续执行下一步操作".into()));
@@ -341,40 +358,18 @@ fn verify_image<T: DapTransport>(
     Ok(vdone)
 }
 
-/// 会话入口（烧录/擦除）：到达 SYNCED（握手有效）。
-/// ⚠ QUIT 后的 SYNCED 握手已失效（目标退回 bootloader 世界，需重新握手才能擦除）——
-/// GET_STATE 无法区分“刚握手”与“QUIT 后”的 SYNCED，因此一律复位状态机后完整重进。
-/// 返回 `Ok(true)` 表示 GET_STATE 的 last_error 显示目标处于安全锁（0x02）
+/// 会话入口（烧录/擦除/恢复）：到达 SYNCED（握手有效）。
+/// 固件 ENTER_PGM 任何状态可进（pgmseq 内含完整断电→放电→上电重进），
+/// 无需先 QUIT/RESET_RUN 归位——带电重进不再依赖 DA 退出帧与多余电源循环。
 fn session_begin_synced<T: DapTransport>(
     client: &mut F2mcClient<T>,
     cb: &mut dyn FnMut(FlowEvent),
     cancel: &CancelToken,
-) -> Result<bool> {
-    let (state, last_err) = client.get_state()?;
-    let locked_hint = last_err == 0x02; // SECURITY_LOCKED
-    match state {
-        3 => {
-            cb(FlowEvent::Log("编程器在读写模式，QUIT 退回 SYNCED".into()));
-            client.quit()?;
-            cb(FlowEvent::Log("重新进入编程模式（QUIT 后握手已失效）".into()));
-            let _ = client.reset_run(); // 状态机复位 IDLE（固件恒回 UNSUPPORTED）
-            enter_pgm_with_recovery(client, cb, cancel)?;
-            Ok(locked_hint)
-        }
-        1 => {
-            cb(FlowEvent::Log("重新进入编程模式（确保握手有效）".into()));
-            let _ = client.reset_run();
-            enter_pgm_with_recovery(client, cb, cancel)?;
-            Ok(locked_hint)
-        }
-        _ => {
-            enter_pgm_with_recovery(client, cb, cancel)?; // IDLE/ERASED → 完整进入
-            Ok(false) // 走完整 ENTER_PGM 时锁会经 SecurityLocked 错误上报
-        }
-    }
+) -> Result<()> {
+    enter_pgm_with_recovery(client, cb, cancel)
 }
 
-/// 会话入口（校验/读取）：到达 RW_MODE（SYNCED 可直进，固件已支持）
+/// 会话入口（校验/读取）：到达 RW_MODE（RW 直进；其余完整重进）
 fn session_begin_rw<T: DapTransport>(
     client: &mut F2mcClient<T>,
     cb: &mut dyn FnMut(FlowEvent),
@@ -392,10 +387,12 @@ fn session_begin_rw<T: DapTransport>(
         }
         1 => {
             cb(FlowEvent::Log("SYNCED 直进读写模式".into()));
+            cb(FlowEvent::StageStart(Stage::FlashInit));
             client.flash_init(FLASH_INIT_XX, FLASH_INIT_YY)
         }
         _ => {
             enter_pgm_with_recovery(client, cb, cancel)?;
+            cb(FlowEvent::StageStart(Stage::FlashInit));
             client.flash_init(FLASH_INIT_XX, FLASH_INIT_YY)
         }
     }
@@ -436,13 +433,14 @@ fn cr_trim_check<T: DapTransport>(
     Ok(fixed)
 }
 
-/// 等待固件从长命令中返回（GET_STATE 轮询），每秒检查取消令牌
+/// 等待固件从长命令中返回（GET_STATE 轮询），每秒检查取消令牌。
+/// 返回固件返回时刻的 (state, last_err)——调用方用于错误诊断信息。
 fn wait_firmware<T: DapTransport>(
     client: &mut F2mcClient<T>,
     cb: &mut dyn FnMut(FlowEvent),
     cancel: &CancelToken,
     max_secs: u32,
-) -> Result<()> {
+) -> Result<(u8, u8)> {
     for _ in 0..max_secs {
         std::thread::sleep(Duration::from_secs(1));
         check_cancel(cancel)?; // 取消在等待期间生效
@@ -451,12 +449,12 @@ fn wait_firmware<T: DapTransport>(
                 cb(FlowEvent::Log(format!(
                     "固件已返回：state={state} last_error=0x{last_err:02X}"
                 )));
-                return Ok(());
+                return Ok((state, last_err));
             }
             Err(_) => continue, // 固件仍忙，继续等
         }
     }
-    Err(ProgError::Transport("编程器长时间无响应".into()))
+    Err(ProgError::Transport("编程器长时间无响应（USB 链路异常）".into()))
 }
 
 /// ERASE 超时恢复：固件侧擦除等待上限 60 s，上位机超时≠失败——
@@ -470,85 +468,70 @@ fn erase_with_recovery<T: DapTransport>(
     match client.erase(addr) {
         Err(ProgError::Timeout) => {
             cb(FlowEvent::Warn("ERASE 超时：等待固件返回（最长 ~90 s）…".into()));
-            wait_firmware(client, cb, cancel, 90)?;
-            Err(ProgError::Transport("擦除失败：目标无响应，请检查接线后重试".into()))
+            let (state, last_err) = wait_firmware(client, cb, cancel, 90)?;
+            Err(ProgError::Transport(format!(
+                "擦除失败：目标无响应（固件 state={state} last_error=0x{last_err:02X}），请检查接线后重试"
+            )))
         }
         other => other,
     }
 }
 
 /// ENTER_PGM 超时恢复：
-/// 目标无响应时固件失败路径最长 ~7 s（握手 200 次重试，2026-08-06 改短）才返回，
-/// 已在上位机 10 s 超时覆盖范围内；此处仅作保底——超时后不得立即发新命令，
-/// 先 GET_STATE 轮询等固件返回（防迟到响应错位），再报错提示检查接线/供电。
+/// 固件内含整循环重试（握手失败时放电→上电→保持→握手 ×3）；成功最坏路径
+/// 较长（大电容目标板放电慢 + 重试）——上位机 40 s 超时已覆盖（见 proto::timeout）。
+/// 此处仅作保底：超时后不得立即发新命令，先 GET_STATE 轮询等固件返回
+/// （防迟到响应错位），并带上固件状态码再报错，便于定位是放电/上电/握手哪段失败。
 fn enter_pgm_with_recovery<T: DapTransport>(
     client: &mut F2mcClient<T>,
     cb: &mut dyn FnMut(FlowEvent),
     cancel: &CancelToken,
 ) -> Result<()> {
-    ensure_idle(client, &mut *cb, cancel)?;
     match client.enter_pgm() {
+        // 固件侧 TIMEOUT：放电/稳定/握手某段超限（固件 RTT 日志可查具体段）。
+        // 带电重进时放电段最常见——固件已加 DBG 主动泄放（pgmseq.c 步骤 1），
+        // 仍超时多为目标板有外部供电/电容过大。
+        Err(ProgError::DeviceStatus(StatusCode::Timeout)) => Err(ProgError::Transport(
+            "进入编程模式超时：目标未就绪（放电/上电/握手超限）。\
+             若目标板有外部供电请先断开；大电容板请人工断电后重试"
+                .into(),
+        )),
         Err(ProgError::Timeout) => {
             cb(FlowEvent::Warn(
-                "ENTER_PGM 超时：固件可能仍在重试握手（最长 ~7 s），等待其返回…".into(),
+                "ENTER_PGM 超时：等待固件返回（放电/握手重试中）…".into(),
             ));
-            wait_firmware(client, cb, cancel, 15)?;
-            Err(ProgError::Transport(
-                "进入编程模式失败：目标无响应，请检查目标板供电与 DBG 接线后重试".into(),
-            ))
+            let (state, last_err) = wait_firmware(client, cb, cancel, 15)?;
+            Err(ProgError::Transport(format!(
+                "进入编程模式失败（固件 state={state} last_error=0x{last_err:02X}）：\
+                 请检查目标板供电与 DBG 接线后重试；\
+                 若 last_error=0x01 且目标板电容较大，多为放电超时"
+            )))
         }
         other => other,
     }
 }
 
-/// 确保编程器状态机处于 IDLE（ENTER_PGM 仅在 IDLE 可用）。
-/// QUIT 后状态为 SYNCED，此时直接重进会撞 STATE_ERROR——先 RESET_RUN 复位状态机
-///（固件恒回 UNSUPPORTED，属预期，忽略错误）。固件忙时 GET_STATE 会超时，轮询等待。
-fn ensure_idle<T: DapTransport>(
-    client: &mut F2mcClient<T>,
-    cb: &mut dyn FnMut(FlowEvent),
-    cancel: &CancelToken,
-) -> Result<()> {
-    // 固件长操作最坏 ~7 s（握手 200 次重试），15 s 轮询预算足够
-    for attempt in 0..15 {
-        match client.get_state() {
-            Ok((state, _)) => {
-                if state != 0 {
-                    cb(FlowEvent::Log(format!(
-                        "编程器状态非 IDLE（state={state}），RESET_RUN 复位状态机"
-                    )));
-                    let _ = client.reset_run();
-                }
-                return Ok(());
-            }
-            Err(ProgError::Timeout) => {
-                check_cancel(cancel)?;
-                if attempt == 0 {
-                    cb(FlowEvent::Warn("编程器仍忙，等待其返回…".into()));
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(ProgError::Transport("编程器长时间无响应".into()))
-}
-
-/// RESET_RUN 容错：编程器无复位硬件，固件恒回 UNSUPPORTED
-/// 并把状态机复位到 IDLE——此时提示人工断电重启，不算失败。
+/// RESET_RUN 容错：新固件经电源开关模拟复位并上报能力（原生/模拟）；
+/// 旧固件恒回 UNSUPPORTED——改走上位机 SET_POWER 断电→上电兜底。
 fn reset_run_graceful<T: DapTransport>(
     client: &mut F2mcClient<T>,
     cb: &mut dyn FnMut(FlowEvent),
 ) -> Result<()> {
     match client.reset_run() {
-        Ok(()) => {
-            cb(FlowEvent::Log("已复位运行用户程序".into()));
+        Ok(crate::proto::ResetMode::Native) => {
+            cb(FlowEvent::Log("已复位运行用户程序（原生复位引脚）".into()));
+            Ok(())
+        }
+        Ok(crate::proto::ResetMode::Simulated) => {
+            cb(FlowEvent::Log(
+                "已复位运行用户程序（当前为兼容模式：断电+上电模拟复位）".into(),
+            ));
             Ok(())
         }
         Err(ProgError::DeviceStatus(StatusCode::Unsupported)) => {
-            // 无 RST 硬件；F2MC-LINK v1.1 起有目标电源开关 → 自动断电→上电运行用户程序
+            // 旧固件无复位实现；F2MC-LINK v1.1 起有目标电源开关 → 自动断电 → 上电运行用户程序
             cb(FlowEvent::Log(
-                "编程器无复位硬件，自动断电重启以运行用户程序".into(),
+                "编程器固件过旧，自动断电重启以运行用户程序".into(),
             ));
             client.set_power(false)?;
             std::thread::sleep(std::time::Duration::from_millis(300));
